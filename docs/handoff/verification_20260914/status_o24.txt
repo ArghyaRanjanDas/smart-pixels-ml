@@ -1,0 +1,17 @@
+=== AF A100 trainers ===
+=== O24b warm (runs/o24b_from_o22) ===
+  warm 41042     ep 10000/10000  best    -40,406 (ep     6, 9994 stale)  med100    -38,310  DONE
+  warm 41142     ep 10000/10000  best    -40,297 (ep     2, 9998 stale)  med100    -38,546  DONE
+  warm 41242     ep 10000/10000  best    -40,408 (ep     5, 9995 stale)  med100    -38,332  DONE
+=== O24 cold on the AF (runs/o24_scratch_bias) ===
+  cold 40342     ep 10000/10000  best    -38,058 (ep  9496,  504 stale)  med100    -36,987  DONE
+  cold 40442     ep 10000/10000  best    -37,532 (ep  7697, 2303 stale)  med100    -36,300  DONE
+  cold 40542     ep 10000/10000  best    -37,747 (ep  9959,   41 stale)  med100    -37,108  DONE
+  cold 40642     ep 10000/10000  best    -37,907 (ep  8915, 1085 stale)  med100    -36,896  DONE
+=== O24 cold still on Gautschi (Depot copy) ===
+  depot 40342    ep  7505/10000  best    -37,352 (ep  7465,   40 stale)  med100    -36,772  
+  depot 40442    ep  7455/10000  best    -36,816 (ep  7122,  333 stale)  med100    -36,087  
+  depot 40542    ep  7341/10000  best    -37,266 (ep  7111,  230 stale)  med100    -36,557  
+  depot 40642    ep  8395/10000  best    -37,843 (ep  7887,  508 stale)  med100    -36,954  
+  gautschi queue: 
+=== reference ===  parent -40,162 | O22 ep100 -39,775 | O24b best ckpts -39.2/-39.4K

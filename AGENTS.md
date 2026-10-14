@@ -3,13 +3,14 @@
 You are in the SmartPixels ML repo (CMS smart-pixel ASIC: 2 of 101 time slices,
 2-bit readout, ViT regression of track parameters). Route yourself:
 
-1. **State of the project** → `docs/handoff/HANDOFF_2026-09-07.md` (newest
-   file in `docs/handoff/`). Read it before touching runs, drivers, or results.
-   It has the campaign ledger (O21 parent → O22 → O23 → O24), what is running,
-   exact resume commands, the code map, and the traps.
+1. **State of the project** → `docs/handoff/HANDOFF_2026-09-14.md`, then
+   `HANDOFF_TO_CLAUDE_20260914.md`. Read these before touching runs, drivers,
+   results or slides. Keep `HANDOFF_TO_CODEX_20260907.md` for the original
+   O21–O24 history; the newer handoff updates its interpretations and priorities.
 2. **Running the campaign driver** → `scripts/distillation/run_simplerouter_mdmm_discovery.py`.
-   Always set `SMARTPIX_MODEL_NAME=ViT_MaxDeep_PairLattice` (unset = wrong
-   architecture, silently). One `--out` dir per seed. `--extend` resumes.
+   For the O21/O24 ViT recipes, set `SMARTPIX_MODEL_NAME=ViT_MaxDeep_PairLattice`
+   (unset = wrong architecture, silently). One `--out` dir per seed; `--extend`
+   resumes. This router-specific driver cannot simply be switched to QConv2D.
 3. **Evaluating checkpoints** → `scripts/distillation/make_bias_comparison.py`
    (`SMARTPIX_ARMS`, `SMARTPIX_OUT`) and `make_perf_plots_o22.py` (pulls).
    Compare NLLs only as `val_plain_nll`; the training loss is a weighted composite.
@@ -18,10 +19,10 @@ You are in the SmartPixels ML repo (CMS smart-pixel ASIC: 2 of 101 time slices,
 5. **Figures** → `runs/perf_plots_*`; scripts `scripts/distillation/make_*.py`.
    Print absolute paths for every figure.
 6. **Live status without any session state** → `bash scripts/status_o24.sh`
-   (both machines, all seeds). Agent-independent follow-ons (the −40.4K
-   recovery job, then migrating cold seed 40642 to the A100) run from
-   `scripts/o24_followon_watch.sh` under `setsid`; its log is
-   `runs/o24_followon.log`. Do not launch duplicates of those two jobs.
+   (both machines, all seeds). The historical follow-ons in
+   `scripts/o24_followon_watch.sh` completed in September 7's campaign.
+   All seven main O24 histories were DONE at 10,000 epochs on September 14.
+   Recheck live status; stale Depot migration copies do not require resuming.
 7. **Durable facts from earlier agent sessions** → `docs/agent-memory/`
    (one fact per file; `README.md` is the index). The Claude "Bias and
    Ceiling" artifact URL in the handoff is read-only for non-Claude agents;
@@ -34,3 +35,19 @@ Rules from the user: run full epoch budgets (no early-stop opinions mid-run);
 never subset a dataset; ask before changing an experiment's meaning, act on
 ops (restart/resubmit/kill broken runs) without asking; push to `myfork`
 freely, never to `origin`; keep reports in this repo.
+
+## Start here (2026-09-14, Codex back to Claude)
+
+Read `HANDOFF_TO_CLAUDE_20260914.md` for the session update and
+`PROMPT_FOR_CLAUDE_20260914.md` for the requested continuation prompt.
+The user wants a shared-understanding discussion about a new QConv2D campaign.
+No new QConv training or protocol was started here. During this migration the
+user asked for documentation and a prompt only; do not launch training.
+The existing lattice deck is on port 8900 (51 slides at the September 14 check).
+
+## Original migration context (2026-09-08, Claude to Codex)
+
+Read `HANDOFF_TO_CODEX_20260907.md` in this directory before doing anything substantive.
+It is the full context transfer from the Claude Code session that ran this project:
+current state with file/line refs, next steps in priority order, decisions and why,
+traps, exact run commands, and facts that exist nowhere else in the repo.

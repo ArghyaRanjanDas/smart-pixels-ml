@@ -1,0 +1,9 @@
+ M AGENTS.md
+ M scripts/distillation/make_perf_plots_o22.py
+?? AGENTS.md.bak-20260908
+?? HANDOFF_TO_CODEX_20260907.md
+?? docs/handoff/verification_20260914/
+?? scripts/distillation/make_history_plots_o24_slides.py
+?? scripts/distillation/make_residual_plots_o24_40442.py
+?? scripts/distillation/make_residual_plots_o24_40442_linear.py
+?? scripts/slides/
