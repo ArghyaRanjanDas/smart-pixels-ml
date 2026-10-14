@@ -76,6 +76,7 @@ def main():
     ap.add_argument('--mask', required=True, choices=list(MASKS))
     ap.add_argument('--epochs', type=int, default=300); ap.add_argument('--warmup', type=int, default=40)
     ap.add_argument('--batch', type=int, default=512)
+    ap.add_argument('--accum', type=int, default=1, help='micro-batches per step (same maths, less memory)')
     ap.add_argument('--lr', type=float, default=6.25e-4); ap.add_argument('--start-lr', type=float, default=2e-4)
     ap.add_argument('--final-lr', type=float, default=1e-6)
     ap.add_argument('--wd', type=float, default=0.04); ap.add_argument('--final-wd', type=float, default=0.4)
@@ -151,15 +152,23 @@ def main():
             m_enc = [m.to(dev, non_blocking=True) for m in m_enc]
             m_pred = [m.to(dev, non_blocking=True) for m in m_pred]
             lr = sched.step(); wd = wd_sched.step()
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                with torch.no_grad():
-                    h = tgt(clips); h = F.layer_norm(h, (h.size(-1),))
-                    tstd.append(h.float().std(0).mean())             # collapse monitor (stays on GPU)
-                    h = apply_masks(h, m_pred, concat=False)
-                z = pred(enc(clips, m_enc), h, m_enc, m_pred)
-                loss = sum(torch.mean(torch.abs(zi - hi)) for zi, hi in zip(z, h)) / len(m_pred)
-            opt.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward(); scaler.unscale_(opt)
+            # --accum K: the batch and ITS masks are split into K equal micro-batches and
+            # gradients accumulated before ONE optimiser step / EMA update. No batch-norm
+            # in a ViT and the loss is a mean over equal-sized pieces, so the gradient is
+            # the full-batch gradient (to float rounding) at ~1/K of the activations.
+            opt.zero_grad(set_to_none=True); mb = clips.shape[0] // a.accum; loss = 0.
+            for k in range(a.accum):
+                sl = slice(k * mb, (k + 1) * mb)
+                c_k = clips[sl]; me_k = [mm[sl] for mm in m_enc]; mp_k = [mm[sl] for mm in m_pred]
+                with torch.autocast('cuda', dtype=torch.bfloat16):
+                    with torch.no_grad():
+                        h = tgt(c_k); h = F.layer_norm(h, (h.size(-1),))
+                        tstd.append(h.float().std(0).mean())         # collapse monitor (stays on GPU)
+                        h = apply_masks(h, mp_k, concat=False)
+                    z = pred(enc(c_k, me_k), h, me_k, mp_k)
+                    l_k = sum(torch.mean(torch.abs(zi - hi)) for zi, hi in zip(z, h)) / len(mp_k) / a.accum
+                scaler.scale(l_k).backward(); loss = loss + l_k.detach()
+            scaler.unscale_(opt)
             if ep > a.warmup and a.clip_grad:
                 torch.nn.utils.clip_grad_norm_(enc.parameters(), a.clip_grad)
                 torch.nn.utils.clip_grad_norm_(pred.parameters(), a.clip_grad)
