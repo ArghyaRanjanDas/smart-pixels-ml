@@ -727,8 +727,10 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
         model_name = 'ViT_Max_SimpleRouterSmooth'
     else:
         model_name = 'ViT_Max_SimpleRouterBeta' if beta else 'ViT_Max_SimpleRouter'
+    # SMARTPIX_FLOAT_INPUT=1: full-precision variant, no SoftQuantize layer -- the
+    # O26 full-view teacher reads the analog 101-slice waveform.
     vit=create_model(model_name, timeslices=(len(PRESLICE_IDX) if PRESLICE_IDX else N_SLICES),
-                     soft_quantize_layer=True,
+                     soft_quantize_layer=not bool(os.environ.get('SMARTPIX_FLOAT_INPUT')),
                      initial_thresholds=thr0, threshold_offset=0.0, initial_levels=LEVELS)
     if FIX_PAIR is not None and PIN_MODE == 'onehot' and _pair_lattice_layer(vit) is not None:
         # The 1-D branch below drives 'simple_router_output'. A pair-lattice
@@ -1004,9 +1006,11 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
          tf.keras.callbacks.CSVLogger(os.path.join(OUT,'history.csv'), append=resume),
          # ONE annealer: the quantizer only (get_layer delegates through the wrapper).
          # Fixed 1000-epoch horizon then hold at k=67 -- see HoldAnnealingScheduler.
-         HoldAnnealingScheduler('cosine', target_layer_name='soft_quantizer_output',
-                                initial_k=1.0, final_k=67.0, verbose=0,
-                                anneal_epochs=ANNEAL_EPOCHS),
+         # (skipped when there is no quantizer: the O26 float full-view teacher)
+         *([HoldAnnealingScheduler('cosine', target_layer_name='soft_quantizer_output',
+                                   initial_k=1.0, final_k=67.0, verbose=0,
+                                   anneal_epochs=ANNEAL_EPOCHS)]
+           if any(l.name == 'soft_quantizer_output' for l in vit.layers) else []),
          *([DelayedHoldAnnealingScheduler(
                 'cosine', target_layer_name='simple_router_output',
                 initial_k=1.0, final_k=beta['final'], verbose=0,
@@ -1043,7 +1047,9 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
     best=float(min(vl)); best_ep=int(np.argmin(vl))
     escaped=(not stuck.aborted) and (best < ESCAPE_BELOW)
 
-    quant=model.get_layer('soft_quantizer_output')
+    # the O26 full-view teacher has no quantizer (float input) and no router
+    try: quant=model.get_layer('soft_quantizer_output')
+    except ValueError: quant=None
     if _has_router:
         router=model.get_layer('simple_router_output')
         mu=router.mu_numpy().astype(np.float64)
@@ -1051,7 +1057,8 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
         mu_top5=[[int(k), float(mu[k])] for k in np.argsort(mu)[::-1][:5]]
     else:
         # pre-sliced: the readout is the fixed PRESLICE pair, not a learned one
-        idx=list(PRESLICE_IDX); mu_top5=[]
+        # pre-sliced: the fixed PRESLICE pair; full-view: every slice
+        idx=(list(PRESLICE_IDX) if PRESLICE_IDX else 'all'); mu_top5=[]
     final_stds, final_corrs = pred_stats(vit, cx, cy)
     info={'seed':seed,'epochs':len(vl),'max_epochs':epochs,'best_epoch':best_ep,
           'escaped':escaped,'aborted_stuck':stuck.aborted,
@@ -1061,7 +1068,8 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
           # pre-sliced runs have no router, so no slot commitment to report
           'final_slot_commitment':([float(mu[idx[0]]), float(mu[idx[1]])]
                                    if _has_router else None),
-          'final_thresholds':[float(t) for t in np.array(quant.thresholds).ravel()],
+          'final_thresholds':([float(t) for t in np.array(quant.thresholds).ravel()]
+                              if quant is not None else None),
           'best_val_loss':best,'final_val_loss':float(vl[-1]),
           'beta_anneal':beta,
           'mdmm':{'scale':MDMM_SCALE,'damping':MDMM_DAMPING,'min_corr':MDMM_MIN_CORR,
@@ -1203,7 +1211,7 @@ def main():
                 lam=info['mdmm']['final_lambdas']; cor=info['mdmm']['final_pred_corr']
                 stamp(f"SANITY done: {info['wall_sec']}s for {info['epochs']} epochs "
                       f"(~{info['wall_sec']/max(info['epochs'],1):.1f}s/ep) "
-                      f"indices={info['final_indices']} thr={[round(t,1) for t in info['final_thresholds']]} "
+                      f"indices={info['final_indices']} thr={[round(t,1) for t in (info['final_thresholds'] or [])] or 'float input'} "
                       f"lambdas={ {k: round(v,4) for k,v in lam.items()} } "
                       f"corrs={ {k: round(v,3) for k,v in cor.items()} }")
                 return
@@ -1211,7 +1219,7 @@ def main():
                 conv.add(seed)
                 cor=info['mdmm']['final_pred_corr']
                 stamp(f"[CONVERGED {len(conv)}/{a.target}] seed={seed} "
-                      f"indices={info['final_indices']} thr={[round(t,2) for t in info['final_thresholds']]} "
+                      f"indices={info['final_indices']} thr={[round(t,2) for t in (info['final_thresholds'] or [])] or 'float input'} "
                       f"best_val={info['best_val_loss']:.1f}@{info['best_epoch']} "
                       f"corrs={ {k: round(v,3) for k,v in cor.items()} } ({info['wall_sec']}s)")
                 if not a.extend:      # an extend worker sees only its own seeds
