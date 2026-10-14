@@ -30,12 +30,18 @@ pi = np.pi
 BASE = ("/work/projects/SmartPixML/dataset_3srb_16x16_50x12P5_centeredIncidence_"
         "10ps_300k_convolved_to_200ps/shuffled_3d")
 TFR = os.path.join(BASE, "TFR_files_all101_noise_contained_discovery")
-OUT = os.path.join(R, "runs", "perf_plots_o22"); os.makedirs(OUT, exist_ok=True)
+OUT = os.environ.get("SMARTPIX_OUT", os.path.join(R, "runs", "perf_plots_o22"))
+os.makedirs(OUT, exist_ok=True)
 MODEL = "ViT_MaxDeep_PairLattice"
 LEVELS = np.array([0., 1., 2., 3.], np.float32)
 
-ARMS = [("parent", f"{R}/runs/o21v2a2_pairlattice/seed_22042/last.weights.hdf5"),
-        ("o22",    f"{R}/runs/o22_ep100/seed_22042/last.weights.hdf5")]
+# SMARTPIX_ARMS="label:path,label:path" overrides the default pair.
+_env = os.environ.get("SMARTPIX_ARMS", "")
+if _env:
+    ARMS = [(a.split(":", 1)[0], a.split(":", 1)[1]) for a in _env.split(",") if a.strip()]
+else:
+    ARMS = [("parent", f"{R}/runs/o21v2a2_pairlattice/seed_22042/last.weights.hdf5"),
+            ("o22",    f"{R}/runs/o22_ep100/seed_22042/last.weights.hdf5")]
 
 meta = json.load(open(os.path.join(TFR, "TFR_test", "metadata.json")))
 SCALE = np.asarray(meta["labels_scale"], dtype=np.float64)
@@ -85,7 +91,10 @@ def gauss(x, A, mu, sigma): return A * np.exp(-(x - mu) ** 2 / (2 * sigma ** 2))
 def pull_ax(ax, df, var, name):
     h = ax.hist(df[var], bins=np.linspace(-5, 5, 50), histtype='step')
     ax.set_xlabel(name); ax.set_yscale('log')
-    xdata = h[1][:-1] + 3/50.; ydata = h[0]
+    # bin CENTRES: np.linspace(-5,5,50) gives 49 bins of width 10/49=0.2041,
+    # so the offset is 0.1020. The inherited 3/50=0.06 was right for an
+    # older +-3 range and made every fitted mu read 0.042 too low.
+    _e = h[1]; xdata = _e[:-1] + (_e[1] - _e[0]) / 2.0; ydata = h[0]
     try:
         pars, _ = curve_fit(gauss, xdata, ydata, p0=[max(ydata.max(), 1), 0, 1], maxfev=10000)
         mu, sg = pars[1], abs(pars[2])

@@ -74,6 +74,25 @@ for g in tf.config.list_physical_devices("GPU"):
 if os.environ.get("SMARTPIX_CHECK_NUMERICS"):
     tf.debugging.enable_check_numerics()
 
+# SMARTPIX_REAL_TANH=1 -- fixes a QKeras gradient trap.
+#
+# The QConv2D backbone ends every hidden block in QActivation("quantized_tanh(
+# b,0,1)"). That call is written as if the signature were (bits, integer,
+# symmetric) like quantized_bits; it is actually (bits, use_stochastic_rounding,
+# symmetric, use_real_tanh), so use_real_tanh is never set and stays False.
+# The False path computes 2*_sigmoid(x)-1, and qkeras sets _default_sigmoid_type
+# = "hard", where hard_sigmoid(x) = clip(0.5x+0.5, 0, 1). So the "tanh" is really
+# clip(x, -1, 1): gradient exactly 1 inside +-1 and exactly 0 outside. A unit
+# whose pre-activation leaves +-1 is frozen permanently.
+#
+# Measured on the finished O25 best checkpoint (s50342, -14,061): 41.5% and
+# 35.4% of the two dense-head layers sit outside the live window, 23.4% mean.
+# Switching the global to "real" widens the live window from +-0.75 to +-6.0
+# (100% vs 68% of N(0,1) units live, 99.8% vs 37.5% at sd=2).
+if os.environ.get('SMARTPIX_REAL_TANH'):
+    from qkeras.quantizers import set_internal_sigmoid
+    set_internal_sigmoid('real')
+
 from prepare_tfrecords import load_tfrecords
 from train import create_model
 from AnnealingScheduler import AnnealingScheduler
@@ -221,6 +240,14 @@ SMOOTH_EPOCHS = int(os.environ.get('SMARTPIX_SMOOTH_EPOCHS', '1500'))
 # at n=1. theta = +30 on the two chosen slices makes the sampled pair
 # deterministic (p ~ 1 - 99*exp(-30)) on the training path and the top-2 on the
 # eval path, so both paths see exactly those slices.
+# SMARTPIX_PRESLICE="10,21": feed the backbone (16,16,2) directly instead of
+# (16,16,101)-plus-a-pinned-router. Same events, same order, same two slices --
+# the generator's metadata has shuffle=False, so on_epoch_end reshuffles nothing
+# and every epoch sees byte-identical batches, which is what makes caching them
+# faithful rather than approximate. Exists because a pinned router still ships
+# 16 GB/epoch to gather 2 channels: 21 s/epoch for a 1,869-parameter model.
+PRESLICE = os.environ.get('SMARTPIX_PRESLICE', '')
+PRESLICE_IDX = ([int(v) for v in PRESLICE.split(',')] if PRESLICE else None)
 FIX_SLICES = os.environ.get('SMARTPIX_FIX_SLICES', '')
 FIX_PAIR = ([int(v) for v in FIX_SLICES.split(',')] if FIX_SLICES else None)
 # clip=True reproduces loss.custom_loss bit-for-bit (density clipped to
@@ -296,6 +323,51 @@ class HoldAnnealingScheduler(AnnealingScheduler):
         s.schedule_params['total_epochs'] = s.anneal_epochs
     def on_epoch_begin(s, epoch, logs=None):
         super().on_epoch_begin(min(epoch, s.anneal_epochs), logs)
+
+
+class PreSlicedCache(tf.keras.utils.Sequence):
+    """Materialise a generator's batches once, keeping only `idx` time slices.
+
+    Valid ONLY because this TFRecord set carries shuffle=False: the generator's
+    on_epoch_end then reshuffles no files and the within-batch gather is
+    disabled, so batch k is the same tensor every epoch. Verified against the
+    live generator before use (see the assertion in build_generators).
+    """
+    def __init__(s, src, idx, cache_path=None):
+        # cache_path (SMARTPIX_PRESLICE_CACHE) makes a CHUNK CHAIN affordable.
+        # Building this from the generator costs a full pass over the 101-slice
+        # TFRecords -- ~2-3 min and a ~20 GB transient peak -- to keep 0.39 GB.
+        # Paying that on every chunk restart is what made chunking look more
+        # expensive than the leak it works around. Saved once, a restart reloads
+        # in seconds with no peak. The caller still re-verifies batch 0 against
+        # the live generator on BOTH paths, so a stale or foreign cache cannot
+        # silently substitute different data.
+        s.X, s.y = [], []
+        if cache_path and os.path.exists(cache_path):
+            z = np.load(cache_path)
+            n = int(z['n'])
+            s.X = [z[f'X{i}'] for i in range(n)]
+            s.y = [z[f'y{i}'] for i in range(n)]
+            s.loaded_from = cache_path
+        else:
+            for i in range(len(src)):
+                xb, yb = src[i]
+                s.X.append(np.asarray(xb)[..., idx].copy())
+                s.y.append(np.asarray(yb).copy())
+            s.loaded_from = None
+            if cache_path:
+                # atomic: a killed writer never leaves a half-written cache.
+                # NB savez appends '.npz' to a PATH that lacks it (which broke
+                # the first version of this), but leaves an open HANDLE alone.
+                tmp = cache_path + '.tmp'
+                with open(tmp, 'wb') as _fh:
+                    np.savez(_fh, n=len(s.X),
+                             **{f'X{i}': a for i, a in enumerate(s.X)},
+                             **{f'y{i}': a for i, a in enumerate(s.y)})
+                os.replace(tmp, cache_path)
+        s.nbytes = sum(a.nbytes for a in s.X) + sum(a.nbytes for a in s.y)
+    def __len__(s): return len(s.X)
+    def __getitem__(s, i): return s.X[i], s.y[i]
 
 
 class BiasGateCallback(tf.keras.callbacks.Callback):
@@ -598,7 +670,13 @@ def _bias_bin_specs(y_sample, nbins):
 def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
     OUT=os.path.join(out_root, f'seed_{seed}'); os.makedirs(OUT, exist_ok=True)
     tf.keras.backend.clear_session()
-    thr0=sorted(np.random.default_rng(seed).uniform(THR_LOW, THR_HIGH, 3).tolist())
+    # SMARTPIX_INIT_THR pins the starting thresholds instead of drawing them
+    # from the seed's uniform(THR_LOW,THR_HIGH). Needed to hold a COLD run at
+    # another campaign's readout (O25 pins the parent's mV thresholds); with
+    # SMARTPIX_FREEZE_THR=1 they then stay there for the whole run.
+    _init_thr = os.environ.get('SMARTPIX_INIT_THR', '')
+    thr0=(sorted(float(v) for v in _init_thr.split(',')) if _init_thr else
+          sorted(np.random.default_rng(seed).uniform(THR_LOW, THR_HIGH, 3).tolist()))
     tf.random.set_seed(seed); np.random.seed(seed); random.seed(seed)
 
     # --- resume: weights + lambdas + append-mode logs -------------------------
@@ -649,7 +727,8 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
         model_name = 'ViT_Max_SimpleRouterSmooth'
     else:
         model_name = 'ViT_Max_SimpleRouterBeta' if beta else 'ViT_Max_SimpleRouter'
-    vit=create_model(model_name, timeslices=N_SLICES, soft_quantize_layer=True,
+    vit=create_model(model_name, timeslices=(len(PRESLICE_IDX) if PRESLICE_IDX else N_SLICES),
+                     soft_quantize_layer=True,
                      initial_thresholds=thr0, threshold_offset=0.0, initial_levels=LEVELS)
     if FIX_PAIR is not None and PIN_MODE == 'onehot' and _pair_lattice_layer(vit) is not None:
         # The 1-D branch below drives 'simple_router_output'. A pair-lattice
@@ -916,8 +995,10 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
     # spikes past it (e.g. the UCB sweep scoring mismatched pairs), so v2 runs
     # set this huge -- the non-finite (NaN) abort path still protects them.
     stuck=AbortOnStuck(thr=float(os.environ.get('SMARTPIX_ABORT_THR', '9.9e4')))
-    cbs=[SimpleRouterLogger(os.path.join(OUT,'router_epochs.csv'),
-                            os.path.join(OUT,'theta_mu.npz'), resume=resume),
+    _has_router = any(l.name == 'simple_router_output' for l in vit.layers)
+    cbs=[*([SimpleRouterLogger(os.path.join(OUT,'router_epochs.csv'),
+                            os.path.join(OUT,'theta_mu.npz'), resume=resume)]
+           if _has_router else []),
          MDMMStateLogger(os.path.join(OUT,'mdmm_epochs.csv'), constraints, vit, cx, cy,
                          resume=resume),
          tf.keras.callbacks.CSVLogger(os.path.join(OUT,'history.csv'), append=resume),
@@ -962,17 +1043,24 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
     best=float(min(vl)); best_ep=int(np.argmin(vl))
     escaped=(not stuck.aborted) and (best < ESCAPE_BELOW)
 
-    router=model.get_layer('simple_router_output'); quant=model.get_layer('soft_quantizer_output')
-    mu=router.mu_numpy().astype(np.float64)
-    idx=router.selected_indices()                        # ascending top-2 of theta
-    mu_top5=[[int(k), float(mu[k])] for k in np.argsort(mu)[::-1][:5]]
+    quant=model.get_layer('soft_quantizer_output')
+    if _has_router:
+        router=model.get_layer('simple_router_output')
+        mu=router.mu_numpy().astype(np.float64)
+        idx=router.selected_indices()                    # ascending top-2 of theta
+        mu_top5=[[int(k), float(mu[k])] for k in np.argsort(mu)[::-1][:5]]
+    else:
+        # pre-sliced: the readout is the fixed PRESLICE pair, not a learned one
+        idx=list(PRESLICE_IDX); mu_top5=[]
     final_stds, final_corrs = pred_stats(vit, cx, cy)
     info={'seed':seed,'epochs':len(vl),'max_epochs':epochs,'best_epoch':best_ep,
           'escaped':escaped,'aborted_stuck':stuck.aborted,
           'init_thresholds':thr0,
           'final_indices':idx,
           'final_mu_top5':mu_top5,
-          'final_slot_commitment':[float(mu[idx[0]]), float(mu[idx[1]])],
+          # pre-sliced runs have no router, so no slot commitment to report
+          'final_slot_commitment':([float(mu[idx[0]]), float(mu[idx[1]])]
+                                   if _has_router else None),
           'final_thresholds':[float(t) for t in np.array(quant.thresholds).ravel()],
           'best_val_loss':best,'final_val_loss':float(vl[-1]),
           'beta_anneal':beta,
@@ -1063,6 +1151,31 @@ def main():
         if not a.sanity and not a.extend and len(conv) >= a.target:
             stamp("target already met -- nothing to do"); return
         tg,vg=load_tfrecords(TFR_TRAIN, TFR_TEST, noise=-1, seed=42)
+        if PRESLICE_IDX is not None:
+            # prove the epoch-invariance this cache depends on, then prove the
+            # cache reproduces the gather the router would have done
+            # tg[i] yields (X, y); index [0] again for X
+            _x0 = np.asarray(tg[0][0])[..., PRESLICE_IDX].copy()
+            tg.on_epoch_end()
+            assert np.array_equal(_x0, np.asarray(tg[0][0])[..., PRESLICE_IDX]), \
+                'generator is NOT epoch-invariant -- pre-slice caching would change the data'
+            _cdir = os.environ.get('SMARTPIX_PRESLICE_CACHE', '')
+            _ctr = _cva = None
+            if _cdir:
+                os.makedirs(_cdir, exist_ok=True)
+                _tag = '_'.join(str(i) for i in PRESLICE_IDX)
+                _ctr = os.path.join(_cdir, f'preslice_train_{_tag}.npz')
+                _cva = os.path.join(_cdir, f'preslice_val_{_tag}.npz')
+            tg, vg = (PreSlicedCache(tg, PRESLICE_IDX, _ctr),
+                      PreSlicedCache(vg, PRESLICE_IDX, _cva))
+            # holds for the disk path too: _x0 came from the live generator this
+            # process just read, so a cache built elsewhere is still checked here
+            assert np.array_equal(tg[0][0], _x0), 'pre-slice cache does not match the gather'
+            _src = f"loaded {os.path.basename(tg.loaded_from)}" if tg.loaded_from else \
+                   (f"built+saved -> {_cdir}" if _cdir else "built (not cached)")
+            stamp(f"PRE-SLICED to slices {PRESLICE_IDX}: train {len(tg)} batches, "
+                  f"val {len(vg)}, {(tg.nbytes+vg.nbytes)/1e9:.2f} GB resident, "
+                  f"{_src}, epoch-invariance verified")
         # One cached val batch for the per-epoch MDMM diagnostics. X is held as a
         # tf.Tensor (tidier than re-converting numpy every epoch), y stays numpy
         # for the correlation maths. NOTE: this does NOT fix the 122 MB/epoch
