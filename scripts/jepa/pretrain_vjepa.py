@@ -86,6 +86,9 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True); torch.manual_seed(a.seed); np.random.seed(a.seed)
     dev = torch.device('cuda')
+    # Small CPU ops spread over all 128 threads only spin (measured: 39 cores busy for
+    # no gain; the mask collator is 230 ms on 1 thread or 128).
+    torch.set_num_threads(8)
 
     xtr = np.load(os.path.join(DATA, 'train_x.npy'), mmap_mode='r')
     st = os.path.join(DATA, 'norm.json')
@@ -104,12 +107,20 @@ def main():
         cfgs_mask=MASKS[a.mask], crop_size=IMG, num_frames=NF, patch_size=PS, tubelet_size=TS)
     _dummy = [(torch.zeros(1), 0)] * a.batch
     ipe = len(X) // a.batch
+    # The official collator is ~230 ms of pure-Python work per batch of 512 -- ~40% of
+    # an iteration when run inline. Draw the NEXT batch's masks in a background thread
+    # while the GPU works on this one (same generator, same distribution; it is what
+    # V-JEPA's DataLoader workers do, which this pod's 64 MB /dev/shm rules out).
+    from concurrent.futures import ThreadPoolExecutor
+    _pool = ThreadPoolExecutor(max_workers=1)
     def batches():
         perm = torch.randperm(len(X))
+        nxt = _pool.submit(coll, _dummy)
         for b in range(ipe):
+            _, m_enc, m_pred = nxt.result()
+            nxt = _pool.submit(coll, _dummy)
             xb = X[perm[b * a.batch:(b + 1) * a.batch]].pin_memory().to(dev, non_blocking=True)
             clips = ((xb.float() - MU) / SD).permute(0, 3, 1, 2).unsqueeze(1)
-            _, m_enc, m_pred = coll(_dummy)
             yield clips.contiguous(), m_enc, m_pred
 
     enc, pred = build(); enc.to(dev); pred.to(dev)
@@ -143,7 +154,7 @@ def main():
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():
                     h = tgt(clips); h = F.layer_norm(h, (h.size(-1),))
-                    tstd.append(float(h.float().std(0).mean()))      # collapse monitor
+                    tstd.append(h.float().std(0).mean())             # collapse monitor (stays on GPU)
                     h = apply_masks(h, m_pred, concat=False)
                 z = pred(enc(clips, m_enc), h, m_enc, m_pred)
                 loss = sum(torch.mean(torch.abs(zi - hi)) for zi, hi in zip(z, h)) / len(m_pred)
@@ -157,11 +168,12 @@ def main():
             with torch.no_grad():
                 for pq, pk in zip(enc.parameters(), tgt.parameters()):
                     pk.data.mul_(m).add_((1. - m) * pq.detach().data)
-            L.append(float(loss)); it += 1
+            L.append(loss.detach()); it += 1                 # no per-iteration host sync
             if a.max_iters and it >= a.max_iters: break
-        w.writerow([ep + 1, it, np.mean(L), lr, wd, m, np.mean(tstd), m_enc[0].shape[1], m_pred[0].shape[1],
+        L = float(torch.stack(L).float().mean()); tstd = float(torch.stack(tstd).float().mean())
+        w.writerow([ep + 1, it, L, lr, wd, m, tstd, m_enc[0].shape[1], m_pred[0].shape[1],
                     round(time.time() - t0, 1)]); log.flush()
-        print(f'ep {ep+1}/{a.epochs} loss {np.mean(L):.4f} target_std {np.mean(tstd):.3f} lr {lr:.2e} '
+        print(f'ep {ep+1}/{a.epochs} loss {L:.4f} target_std {tstd:.3f} lr {lr:.2e} '
               f'mom {m:.5f} {time.time()-t0:.0f}s peak_gpu {torch.cuda.max_memory_allocated()/1e9:.1f}GB', flush=True)
         torch.save({'enc': enc.state_dict(), 'pred': pred.state_dict(), 'tgt': tgt.state_dict(),
                     'opt': opt.state_dict(), 'epoch': ep + 1, 'it': it}, ck + '.tmp')
