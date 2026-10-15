@@ -14,7 +14,7 @@ OUTROOT=${8:-$REPO/runs/o26_jepa}
 PY=/work/users/das214/envs/smartpix-2bit/bin/python
 OUT=$OUTROOT/$ARM/s$SEED
 CACHE=$REPO/runs/o25_qconv2d/_preslice_cache
-LAT=$REPO/runs/o26_jepa/_teacher_latent
+LAT=${LATDIR:-$REPO/runs/o26_jepa/_teacher_latent}
 mkdir -p "$OUT"
 cur_ep () { local h; h=$(ls "$OUT"/seed_*/history.csv 2>/dev/null | head -1)
             [ -n "$h" ] && echo $(( $(wc -l < "$h") - 1 )) || echo 0; }
@@ -25,6 +25,7 @@ while [ "$cur" -lt "$TOTAL" ]; do
   env SMARTPIX_MODEL_NAME=QConv2D_Max SMARTPIX_LOSS_V2=1 SMARTPIX_PRESLICE=10,21 \
       SMARTPIX_PRESLICE_CACHE="$CACHE" SMARTPIX_LATENT_CACHE="$LAT" \
       SMARTPIX_LATENT_LAMBDA="$LAM" SMARTPIX_NFILTERS="$NF" \
+      SMARTPIX_LATENT_TAP="${LTAP:-last}" SMARTPIX_LATENT_LOSS="${LLOSS:-mse}" \
       SMARTPIX_ZEROBIAS=1 SMARTPIX_BINBAL=byterm SMARTPIX_NBINS=15 \
       SMARTPIX_BIAS_TOL=0.17 SMARTPIX_BIAS_MAXLAM=5.0 SMARTPIX_BIAS_INFCAP=2.0 \
       SMARTPIX_INIT_THR=8.565593719482422,20.227340698242188,47.49168395996094 \

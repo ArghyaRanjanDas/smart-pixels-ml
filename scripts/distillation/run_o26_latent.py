@@ -246,6 +246,12 @@ NFILTERS = int(os.environ.get('SMARTPIX_NFILTERS', '5'))
 LATENT_CACHE  = os.environ.get('SMARTPIX_LATENT_CACHE', '')
 LATENT_LAMBDA = float(os.environ.get('SMARTPIX_LATENT_LAMBDA', '0'))
 PRED_HIDDEN   = int(os.environ.get('SMARTPIX_PRED_HIDDEN', '64'))
+# where the training-only predictor attaches, and the latent loss:
+#   last/mse (default): last hidden layer, MSE   -- the parked same-view arm
+#   pool/l1           : the 4x4xF pooled conv map, L1 on LayerNorm'd targets -- V-JEPA style,
+#                       per-region targets from the full-view V-JEPA encoder
+LATENT_TAP  = os.environ.get('SMARTPIX_LATENT_TAP', 'last')
+LATENT_LOSS = os.environ.get('SMARTPIX_LATENT_LOSS', 'mse')
 WIDE_Y = bool(TEACHER_CACHE or LATENT_CACHE)     # y carries extra columns beyond the 4 labels
 assert not (TEACHER_CACHE and LATENT_CACHE), 'O26 arms use the latent OR the KL target, not both'
 from distill import gaussian_kl
@@ -940,14 +946,20 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
         # output = [14 Gaussian params | 64 predicted teacher latents]. The 14
         # stay in columns 0..13, so every constraint (explicit column indices)
         # and every Gaussian computation (sliced to :14 below) is unaffected.
-        _h = vit.layers[-1].input                      # last hidden layer (16 at n_filters=5)
+        _ldim = json.load(open(os.path.join(LATENT_CACHE, 'stats.json')))['dim']
+        if LATENT_TAP == 'pool':
+            # pooled 4x4xF conv map (input of the Flatten feeding the dense head)
+            _fl = [l for l in vit.layers if isinstance(l, tf.keras.layers.Flatten)][-1]
+            _h = _fl.output
+        else:
+            _h = vit.layers[-1].input                  # last hidden layer (16 at n_filters=5)
         _z = tf.keras.layers.Dense(PRED_HIDDEN, activation='relu', name='jepa_pred_1')(_h)
-        _z = tf.keras.layers.Dense(64, activation='linear', name='jepa_pred_2')(_z)
+        _z = tf.keras.layers.Dense(_ldim, activation='linear', name='jepa_pred_2')(_z)
         _student_params = vit.count_params()
         vit = tf.keras.Model(vit.inputs,
                              tf.keras.layers.Concatenate(name='jepa_concat')([vit.outputs[0], _z]),
                              name='student_with_predictor')
-        stamp(f"[seed {seed}] O26 LATENT predictor {_h.shape[-1]}->{PRED_HIDDEN}->64 "
+        stamp(f"[seed {seed}] O26 LATENT predictor tap={LATENT_TAP} {_h.shape[-1]}->{PRED_HIDDEN}->{_ldim} "
               f"(training-only: {vit.count_params() - _student_params} params); "
               f"on-chip student {_student_params} params")
     model=MDMM(vit, constraints, constraint_samples=MDMM_CONSTRAINT_SAMPLES,
@@ -1003,11 +1015,12 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
             # event, then x batch size -- the same batch-SUM units as the v2 NLL
             # (the KL arm's units lesson: a per-event mean added raw is 1/5000 weight)
             n = tf.cast(tf.shape(p)[0], tf.float32)
-            d2 = tf.square(p[:, 14:] - y[:, 4:]) * _live_t
+            e = p[:, 14:] - y[:, 4:]
+            d2 = (tf.abs(e) if LATENT_LOSS == 'l1' else tf.square(e)) * _live_t
             lat = tf.reduce_mean(tf.reduce_sum(d2, axis=1) / _nlive)
             return _base_loss_l(y[:, :4], p[:, :14]) + LATENT_LAMBDA * lat * n
         stamp(f"[seed {seed}] O26 LATENT distill lambda={LATENT_LAMBDA} on "
-              f"{int(_nlive)}/{_st['dim']} live teacher units (dense_11), batch-SUM scaled; "
+              f"{int(_nlive)}/{_st['dim']} live teacher units ({_st['layer']}), {LATENT_LOSS}, batch-SUM scaled; "
               f"plain_nll stays ground-truth only")
     elif TEACHER_CACHE:
         _base_loss4 = task_loss
@@ -1024,7 +1037,8 @@ def run_one_seed(seed, epochs, out_root, tg, vg, stamp, cbatch, beta=None):
         def latent_mse(y, p):
             # per-event mean squared error on the live standardised units, UNscaled:
             # 1.0 = no better than predicting the train mean, 0 = exact teacher latent
-            d2 = tf.square(p[:, 14:] - y[:, 4:]) * _live_t
+            e = p[:, 14:] - y[:, 4:]
+            d2 = (tf.abs(e) if LATENT_LOSS == 'l1' else tf.square(e)) * _live_t
             return tf.reduce_mean(tf.reduce_sum(d2, axis=1) / _nlive)
         _metrics.append(latent_mse)
     model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=1e-3),
