@@ -9,7 +9,7 @@ alone lowers the empty-token std but should leave the signal tokens varied.
 import os, sys, json, numpy as np, torch, torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pretrain_vjepa import build, NF, PS, TS, DATA
-dev = torch.device('cuda')
+dev = torch.device(os.environ.get('DIAG_DEVICE', 'cuda'))   # DIAG_DEVICE=cpu when the GPU is full
 ck = sys.argv[1]
 ns = json.load(open(os.path.join(DATA, 'norm.json')))
 xv = np.load(os.path.join(DATA, 'val_x.npy'), mmap_mode='r')
@@ -21,7 +21,7 @@ sig = q > np.percentile(q.numpy(), 75)          # top-quartile-charge tokens
 
 def stats(enc):
     # in chunks: one 2,000-event pass needs ~0.6 GB more than a shared GPU always has
-    with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+    with torch.no_grad(), torch.autocast(dev.type, dtype=torch.bfloat16, enabled=dev.type == 'cuda'):
         h = torch.cat([enc(clips[i:i + 250]).float().cpu() for i in range(0, len(clips), 250)]).to(dev)
     h = F.layer_norm(h, (h.size(-1),)).cpu()                                   # as the targets are built
     ev = h.mean(1); ev = ev - ev.mean(0)
