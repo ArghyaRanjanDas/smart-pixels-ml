@@ -20,8 +20,9 @@ q = x.abs().permute(0, 3, 1, 2).reshape(2000, NF // TS, TS, 4, PS, 4, PS).sum((2
 sig = q > np.percentile(q.numpy(), 75)          # top-quartile-charge tokens
 
 def stats(enc):
+    # in chunks: one 2,000-event pass needs ~0.6 GB more than a shared GPU always has
     with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-        h = enc(clips).float()
+        h = torch.cat([enc(clips[i:i + 250]).float().cpu() for i in range(0, len(clips), 250)]).to(dev)
     h = F.layer_norm(h, (h.size(-1),)).cpu()                                   # as the targets are built
     ev = h.mean(1); ev = ev - ev.mean(0)
     s = torch.linalg.svdvals(ev); p = s / s.sum(); er = float(torch.exp(-(p * torch.log(p + 1e-12)).sum()))
