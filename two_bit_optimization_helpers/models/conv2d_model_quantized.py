@@ -214,3 +214,34 @@ def QConv2D_Max_PairLattice(shape, n_filters, pool_size, initial_thresholds,
     stack = QActivation("quantized_bits(8, 0, alpha=1)")(stack)
     stack = _var_network(stack, hidden=16, output=14)
     return Model(inputs=x_in, outputs=stack, name='smrtpxl_qconv2d_pairlattice')
+
+
+def KANConv2D_Max_SoftQuantizer(shape, n_filters, pool_size, initial_thresholds, threshold_offset,
+                                initial_levels=None, trainable_thresholds=True,
+                                table_bits=4, act_bits=4):
+    """KAN-ified QConv2D_Max (branch `kan`, step 1): the conv block becomes KAN layers,
+    everything else is identical -- same 2-bit digitiser, pooling and 80->16->16->14 head.
+
+      QSeparableConv2D(5,3x3) + tanh4 + QConv2D(5,1x1) + tanh4      (QConv2D_Max)
+      QKANConv2D(5,3x3) on the 2-bit levels {0..3} -> 4-entry tables, + tanh4
+      QKANConv2D(5,1x1) on the 4-bit tanh codes   -> 16-entry tables, + tanh4
+    Tables hold `table_bits`-bit entries (default 4, like QConv2D's 4-bit weights);
+    activations stay quantized_tanh(act_bits) (default 4). No multipliers in the block.
+    """
+    from models.kan_layers import QKANConv2D
+    x_base = x_in = Input(shape)
+    x_base = SoftQuantizeLayer(
+        n_bits=2, initial_thresholds=initial_thresholds, threshold_offset=threshold_offset,
+        initial_levels=initial_levels, trainable_levels=False,
+        trainable_thresholds=trainable_thresholds, initial_k=1.0, trainable_k=True,
+        name='soft_quantizer_output')(x_base)
+    stack = QKANConv2D(n_filters, 3, n_levels=4, x_range=(0.0, 3.0), table_bits=table_bits,
+                       name='kanconv_3x3')(x_base)
+    stack = QActivation(f"quantized_tanh({act_bits}, 0, 1)")(stack)
+    stack = QKANConv2D(n_filters, 1, n_levels=2 ** act_bits, x_range=(-1.0, 1.0), table_bits=table_bits,
+                       name='kanconv_1x1')(stack)
+    stack = QActivation(f"quantized_tanh({act_bits}, 0, 1)")(stack)
+    stack = AveragePooling2D(pool_size=(pool_size, pool_size), strides=None, padding="valid")(stack)
+    stack = QActivation("quantized_bits(8, 0, alpha=1)")(stack)
+    stack = _var_network(stack, hidden=16, output=14)
+    return Model(inputs=x_in, outputs=stack)
