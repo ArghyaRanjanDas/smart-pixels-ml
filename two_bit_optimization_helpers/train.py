@@ -59,6 +59,8 @@ from models.conv2d_model_quantized import (
     QConv2D_Slim,
     QConv2D_Max_SoftQuantizer,
     KANConv2D_Max_SoftQuantizer,
+    QConv2D_Max4_SoftQuantizer,
+    KANConv2D_Max4_SoftQuantizer,
     QConv2D_Full_SoftQuantizer,
     QConv2D_Slim_SoftQuantizer,
 )
@@ -117,6 +119,8 @@ model_list = {
     'QConv2D_Max': [QConv2D_Max, QConv2D_Max_SoftQuantizer],
     # branch `kan`: KAN-ified conv block, soft-quantizer variant only
     'KANConv2D_Max': [None, KANConv2D_Max_SoftQuantizer],
+    'QConv2D_Max4': [None, QConv2D_Max4_SoftQuantizer],     # all-4-bit QConv2D baseline
+    'KANConv2D_Max4': [None, KANConv2D_Max4_SoftQuantizer], # all-4-bit KAN conv model
     # O25: QConv2D behind the O24 router+quantizer front end, so the discovery
     # driver and the whole loss/constraint stack are shared with the ViT arms.
     'QConv2D_Max_PairLattice': [QConv2D_Max_PairLattice, QConv2D_Max_PairLattice],

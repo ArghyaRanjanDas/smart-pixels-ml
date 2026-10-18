@@ -245,3 +245,58 @@ def KANConv2D_Max_SoftQuantizer(shape, n_filters, pool_size, initial_thresholds,
     stack = QActivation("quantized_bits(8, 0, alpha=1)")(stack)
     stack = _var_network(stack, hidden=16, output=14)
     return Model(inputs=x_in, outputs=stack)
+
+
+def _var_network_bits(var, hidden=16, output=14, bits=8):
+    """_var_network with the head precision as a parameter (bits=8 reproduces it exactly)."""
+    var = Flatten()(var)
+    for units in (hidden, hidden):
+        var = QDense(units,
+                     kernel_quantizer=quantized_bits(bits, 0, alpha=1),
+                     bias_quantizer=quantized_bits(bits, 0, alpha=1),
+                     kernel_regularizer=tf.keras.regularizers.L1L2(0.01),
+                     activity_regularizer=tf.keras.regularizers.L2(0.01))(var)
+        var = QActivation(f"quantized_tanh({bits}, 0, 1)")(var)
+    var = QDense(output,
+                 kernel_quantizer=quantized_bits(bits, 0, alpha=1),
+                 bias_quantizer=quantized_bits(bits, 0, alpha=1),
+                 kernel_regularizer=tf.keras.regularizers.L1L2(0.01),
+                 activity_regularizer=tf.keras.regularizers.L2(0.01))(var)
+    return var
+
+
+def QConv2D_Max4_SoftQuantizer(shape, n_filters, pool_size, initial_thresholds, threshold_offset,
+                               initial_levels=None, trainable_thresholds=True):
+    """QConv2D_Max with the post-pool quantiser and the dense head at 4 bits (was 8).
+    Conv block unchanged (already 4-bit). The 4-bit baseline for the KAN study."""
+    x_base = x_in = Input(shape)
+    x_base = SoftQuantizeLayer(
+        n_bits=2, initial_thresholds=initial_thresholds, threshold_offset=threshold_offset,
+        initial_levels=initial_levels, trainable_levels=False,
+        trainable_thresholds=trainable_thresholds, initial_k=1.0, trainable_k=True,
+        name='soft_quantizer_output')(x_base)
+    stack = _conv_network(x_base, n_filters)
+    stack = AveragePooling2D(pool_size=(pool_size, pool_size), strides=None, padding="valid")(stack)
+    stack = QActivation("quantized_bits(4, 0, alpha=1)")(stack)
+    stack = _var_network_bits(stack, hidden=16, output=14, bits=4)
+    return Model(inputs=x_in, outputs=stack)
+
+
+def KANConv2D_Max4_SoftQuantizer(shape, n_filters, pool_size, initial_thresholds, threshold_offset,
+                                 initial_levels=None, trainable_thresholds=True):
+    """KANConv2D_Max with the post-pool quantiser and dense head at 4 bits (all-4-bit model)."""
+    from models.kan_layers import QKANConv2D
+    x_base = x_in = Input(shape)
+    x_base = SoftQuantizeLayer(
+        n_bits=2, initial_thresholds=initial_thresholds, threshold_offset=threshold_offset,
+        initial_levels=initial_levels, trainable_levels=False,
+        trainable_thresholds=trainable_thresholds, initial_k=1.0, trainable_k=True,
+        name='soft_quantizer_output')(x_base)
+    stack = QKANConv2D(n_filters, 3, n_levels=4, x_range=(0.0, 3.0), table_bits=4, name='kanconv_3x3')(x_base)
+    stack = QActivation("quantized_tanh(4, 0, 1)")(stack)
+    stack = QKANConv2D(n_filters, 1, n_levels=16, x_range=(-1.0, 1.0), table_bits=4, name='kanconv_1x1')(stack)
+    stack = QActivation("quantized_tanh(4, 0, 1)")(stack)
+    stack = AveragePooling2D(pool_size=(pool_size, pool_size), strides=None, padding="valid")(stack)
+    stack = QActivation("quantized_bits(4, 0, alpha=1)")(stack)
+    stack = _var_network_bits(stack, hidden=16, output=14, bits=4)
+    return Model(inputs=x_in, outputs=stack)
