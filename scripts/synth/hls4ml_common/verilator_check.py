@@ -1,0 +1,214 @@
+#!/usr/bin/env python
+"""Verilator RTL check of a Vitis-HLS (hls4ml) design against Keras -- replaces Vitis cosim (user decision 2026-10-20).
+
+Drives the RTL top (the HLS core, or the make_cfgwrap.py flip-flop wrapper of a programmable design) through its
+ap_ctrl_hs block protocol (ap_start/ap_ready/ap_done/ap_idle), with <in>_ap_vld held with ap_start and outputs taken
+when every <out>_ap_vld (or ap_done when there are none) is high. Two passes over the same N events:
+  seq    : one event at a time (start -> wait for the outputs -> idle gap)  -> latency in cycles (start..valid)
+  stream : ap_start held high, a new event offered every time ap_ready is seen  -> II in cycles, plus exactness
+           under back-to-back operation.
+Outputs are written as raw result_t integers and judged by cosim_check.check_values(raw=True) on the LSB grid.
+For a wrapper top, the trained weight image (<core>_cfg.hex) is shifted in with cfg_we/cfg_din before anything else.
+
+  python verilator_check.py --rtl <dir with HLS .v files> [--extra wrapper.v] --top <module> --prj <hls4ml prj>
+                            --x x.npy --y y.npy [--n 200] [--cfg-hex img.hex] --out <build dir> [--jobs 16]
+Writes <out>/verilator_check.json (exact counts seq/stream, latency, II, cycles) and returns non-zero if not exact.
+"""
+import os, re, sys, json, glob, shutil, argparse, subprocess, time
+import numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cosim_check
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--rtl', required=True); ap.add_argument('--extra', action='append', default=[])
+ap.add_argument('--top', required=True); ap.add_argument('--prj', required=True)
+ap.add_argument('--x', required=True); ap.add_argument('--y', required=True)
+ap.add_argument('--n', type=int, default=200); ap.add_argument('--cfg-hex')
+ap.add_argument('--out', required=True); ap.add_argument('--jobs', type=int, default=16)
+ap.add_argument('--timeout', type=int, default=5000, help='max cycles per event before giving up')
+a = ap.parse_args()
+out = os.path.abspath(a.out); os.makedirs(out, exist_ok=True)
+
+# ---------------- ports of the top module
+srcs = sorted(glob.glob(os.path.join(a.rtl, '*.v'))) + [os.path.abspath(e) for e in a.extra]
+topsrc = None
+for s in srcs:
+    t = open(s).read()
+    m = re.search(rf'\bmodule\s+{re.escape(a.top)}\s*[(#]', t)
+    if m:
+        topsrc = t[m.start():t.index('endmodule', m.start())]; break
+assert topsrc, f'module {a.top} not found in {a.rtl} / {a.extra}'
+hdr = topsrc[:topsrc.index(';')]
+names = [re.sub(r'.*?(\w+)\s*$', r'\1', n.strip()) for n in hdr[hdr.index('(') + 1:hdr.rindex(')')].split(',')]
+decl = {}
+for d, w, n in re.findall(r'(input|output)\s+(?:wire\s+|reg\s+)?(\[\s*\d+\s*:\s*\d+\s*\])?\s*(\w+)\s*[,;)\n]', topsrc):
+    decl[n] = (d, int(re.match(r'\[\s*(\d+)', w).group(1)) + 1 if w else 1)
+assert all(n in decl for n in names), [n for n in names if n not in decl][:5]
+W = lambda n: decl[n][1]
+idx = lambda n: int(re.search(r'_(\d+)$', n).group(1)) if re.search(r'_(\d+)$', n) else -1
+ctrl = {'ap_clk', 'ap_rst', 'ap_rst_n', 'ap_start', 'ap_done', 'ap_idle', 'ap_ready', 'cfg_we', 'cfg_din'}
+din = [n for n in names if decl[n][0] == 'input' and n not in ctrl and not n.endswith('_ap_vld')]
+vin = [n for n in names if decl[n][0] == 'input' and n.endswith('_ap_vld')]
+douts = sorted([n for n in names if decl[n][0] == 'output' and n not in ctrl and not n.endswith('_ap_vld')], key=idx)
+ovld = [n for n in names if decl[n][0] == 'output' and n.endswith('_ap_vld')]
+rst = 'ap_rst' if 'ap_rst' in decl else 'ap_rst_n'
+has_cfg = 'cfg_we' in decl
+assert not has_cfg or a.cfg_hex, 'wrapper top needs --cfg-hex'
+
+# ---------------- types / data
+defs = open(os.path.join(a.prj, 'firmware', 'defines.h')).read()
+def fx(name):
+    m = re.search(r'typedef\s+ap_(u?)fixed<\s*(\d+)\s*,\s*(-?\d+)[^>]*>\s+' + name + r'\s*;', defs)
+    return int(m.group(2)), int(m.group(3)), m.group(1) == ''
+iW, iI, _ = fx('input_t'); rW, rI, rsigned = fx('result_t'); F = rW - rI
+X = np.load(a.x)[:a.n]; Y = np.load(a.y)[:a.n]; N = len(X)
+Xf = X.reshape(N, -1); NIN = Xf.shape[1]; Yf = Y.reshape(N, -1); NOUT = Yf.shape[1]
+xr = np.rint(Xf * 2.0 ** (iW - iI)).astype(np.int64)
+assert np.array_equal(xr, Xf * 2.0 ** (iW - iI)), 'inputs off the input_t grid'
+xr &= (1 << iW) - 1
+assert len(douts) == NOUT and all(W(o) == rW for o in douts), (len(douts), NOUT, [W(o) for o in douts[:3]], rW)
+if len(din) == 1 and W(din[0]) == NIN * iW:
+    in_mode = 'bus'
+else:
+    din = sorted(din, key=idx); in_mode = 'split'
+    assert len(din) == NIN and [idx(n) for n in din] == list(range(NIN)) and all(W(n) == iW for n in din), (len(din), NIN)
+cfg = [int(l, 16) for l in open(a.cfg_hex).read().split()] if has_cfg else []
+
+# ---------------- C++ testbench
+def cty(w):
+    return 'uint8_t' if w <= 8 else 'uint16_t' if w <= 16 else 'uint32_t' if w <= 32 else 'uint64_t'
+L = []
+L.append(f'// AUTO-GENERATED by verilator_check.py for top {a.top}: {N} events, seq + stream passes')
+L.append('#include <cstdio>\n#include <cstdint>\n#include <vector>\n#include "verilated.h"\n'
+         f'#include "V{a.top}.h"')
+L.append(f'static const int N = {N}, NIN = {NIN}, NOUT = {NOUT}, TMO = {a.timeout};')
+L.append(f'static const uint8_t XIN[{N}][{NIN}] = {{' + ','.join('{' + ','.join(map(str, r)) + '}' for r in xr) + '};')
+if has_cfg:
+    L.append(f'static const uint8_t CFG[{len(cfg)}] = {{' + ','.join(map(str, cfg)) + '};')
+L.append(f'static V{a.top}* top; static long cyc = 0;')
+L.append('static void tick() { top->ap_clk = 1; top->eval(); cyc++; top->ap_clk = 0; top->eval(); }')
+# set inputs of event e (or zeros if e < 0)
+body = []
+if in_mode == 'split':
+    for i, n in enumerate(din):
+        body.append(f'  top->{n} = e < 0 ? 0 : XIN[e][{i}];')
+else:
+    n = din[0]; tw = NIN * iW
+    if tw <= 64:
+        body.append(f'  {{ uint64_t v = 0; if (e >= 0) for (int i = 0; i < NIN; i++) v |= (uint64_t)XIN[e][i] << ({iW} * i); top->{n} = v; }}')
+    else:
+        nw = (tw + 31) // 32
+        body.append(f'  for (int w = 0; w < {nw}; w++) top->{n}[w] = 0;')
+        body.append(f'  if (e >= 0) for (int i = 0; i < NIN; i++) {{ int b = {iW} * i; '
+                    f'top->{n}[b / 32] |= (uint32_t)XIN[e][i] << (b % 32); }}')
+L.append('static void set_in(int e) {\n' + '\n'.join(body) + '\n}')
+L.append('static void set_vld(int v) {' + ''.join(f' top->{n} = v;' for n in vin) + ' }')
+vexpr = ' && '.join(f'top->{n}' for n in ovld) if ovld else 'top->ap_done'
+vany = ' || '.join(f'top->{n}' for n in ovld) if ovld else 'top->ap_done'
+L.append(f'static bool all_vld() {{ return {vexpr}; }}')
+L.append(f'static bool any_vld() {{ return {vany}; }}')
+sx = (f'(int64_t)(((uint64_t)(v) << {64 - rW})) >> {64 - rW}' if rsigned else '(int64_t)(v)')
+L.append('static void get_out(int64_t* o) {\n' + '\n'.join(
+    f'  {{ uint64_t v = (uint64_t)top->{n} & ((1ULL << {rW}) - 1); o[{k}] = {sx}; }}' for k, n in enumerate(douts)) + '\n}')
+L.append(r'''
+static void dump(const char* fn, std::vector<std::vector<int64_t>>& R) {
+  FILE* f = fopen(fn, "w");
+  for (auto& r : R) { for (int k = 0; k < NOUT; k++) fprintf(f, k ? " %lld" : "%lld", (long long)r[k]); fprintf(f, "\n"); }
+  fclose(f);
+}
+int main(int argc, char** argv) {
+  Verilated::commandArgs(argc, argv);
+  top = new V''' + a.top + r''';
+  int bad_protocol = 0;
+  top->ap_clk = 0; top->ap_start = 0; set_in(-1); set_vld(0);''' +
+  ('\n  top->cfg_we = 0; top->cfg_din = 0;' if has_cfg else '') + f'''
+  top->{rst} = {1 if rst == 'ap_rst' else 0}; top->eval();
+  for (int i = 0; i < 8; i++) tick();
+  top->{rst} = {0 if rst == 'ap_rst' else 1}; top->eval();
+  for (int i = 0; i < 4; i++) tick();''' + ('''
+  for (unsigned k = 0; k < sizeof(CFG); k++) { top->cfg_we = 1; top->cfg_din = CFG[k]; top->eval(); tick(); }
+  top->cfg_we = 0; top->cfg_din = 0; top->eval(); tick(); tick();
+  long cfg_cycles = sizeof(CFG);''' if has_cfg else '\n  long cfg_cycles = 0;') + r'''
+  std::vector<std::vector<int64_t>> RS, RT; std::vector<long> lat;
+  int64_t o[NOUT];
+  // ---------- seq pass: one event at a time
+  for (int e = 0; e < N; e++) {
+    set_in(e); set_vld(1); top->ap_start = 1; top->eval();
+    long c0 = cyc; bool acc = false, got = false; int t = 0;
+    while (!got && t < TMO) {
+      top->eval();
+      if (any_vld() && !all_vld()) bad_protocol++;
+      if (all_vld()) { get_out(o); RS.push_back(std::vector<int64_t>(o, o + NOUT)); lat.push_back(cyc - c0); got = true; }
+      bool rdy = top->ap_ready;
+      tick(); t++;
+      if (rdy && !acc) { acc = true; top->ap_start = 0; top->eval(); }   // inputs/vld held until the outputs (ap_none-safe)
+    }
+    if (!got) { fprintf(stderr, "seq event %d: no output after %d cycles\n", e, TMO); break; }
+    top->ap_start = 0; set_vld(0); top->eval();
+    for (int i = 0; i < 3; i++) tick();
+  }
+  // ---------- stream pass: ap_start held high, next event on every ap_ready
+  std::vector<long> rdy_c, vld_c;
+  { int e = 0; long t = 0;
+    set_in(0); set_vld(1); top->ap_start = 1; top->eval();
+    while ((int)RT.size() < N && t < (long)TMO * 4 + (long)N * 64) {
+      top->eval();
+      if (any_vld() && !all_vld()) bad_protocol++;
+      if (all_vld()) { get_out(o); RT.push_back(std::vector<int64_t>(o, o + NOUT)); vld_c.push_back(cyc); }
+      bool rdy = top->ap_ready && top->ap_start;
+      tick(); t++;
+      if (rdy) { rdy_c.push_back(cyc); e++;
+        if (e < N) { set_in(e); } else { top->ap_start = 0; set_vld(0); set_in(-1); } top->eval(); }
+    }
+  }
+  dump("rtl_seq.txt", RS); dump("rtl_stream.txt", RT);
+  FILE* f = fopen("rtl_timing.json", "w");
+  long lmin = 1L << 40, lmax = -1; for (long l : lat) { if (l < lmin) lmin = l; if (l > lmax) lmax = l; }
+  long imin = 1L << 40, imax = -1; for (size_t i = 1; i < rdy_c.size(); i++) { long d = rdy_c[i] - rdy_c[i-1]; if (d < imin) imin = d; if (d > imax) imax = d; }
+  long omin = 1L << 40, omax = -1; for (size_t i = 1; i < vld_c.size(); i++) { long d = vld_c[i] - vld_c[i-1]; if (d < omin) omin = d; if (d > omax) omax = d; }
+  long first_lat = vld_c.empty() || rdy_c.empty() ? -1 : 0;
+  fprintf(f, "{\"seq_events\": %zu, \"stream_events\": %zu, \"latency_min\": %ld, \"latency_max\": %ld, "
+             "\"ii_ready_min\": %ld, \"ii_ready_max\": %ld, \"ii_valid_min\": %ld, \"ii_valid_max\": %ld, "
+             "\"stream_accepted\": %zu, \"cfg_load_cycles\": %ld, \"partial_valid_cycles\": %d, \"total_cycles\": %ld}\n",
+          RS.size(), RT.size(), lmin, lmax, imin, imax, omin, omax, rdy_c.size(), cfg_cycles, bad_protocol, cyc);
+  fclose(f); (void)first_lat;
+  printf("seq %zu stream %zu latency %ld..%ld II(ready) %ld..%ld II(valid) %ld..%ld\n",
+         RS.size(), RT.size(), lmin, lmax, imin, imax, omin, omax);
+  top->final(); delete top; return 0;
+}
+''')
+open(f'{out}/tb_{a.top}.cpp', 'w').write('\n'.join(L))
+
+# ---------------- build + run
+for s in glob.glob(os.path.join(a.rtl, '*.dat')):
+    shutil.copy(s, out)
+t0 = time.time()
+cmd = (['verilator', '--cc', '--exe', '--build', '-j', str(a.jobs), '--top-module', a.top, '-Wno-fatal', '-Wno-lint',
+        '-Wno-style', '-Wno-MULTIDRIVEN', '--no-timing', '--x-assign', 'fast', '--x-initial', 'fast', '-O3', '--output-split', '20000',
+        '--output-split-cfuncs', '2000', '-CFLAGS', '-O1', '--Mdir', f'{out}/obj_dir', '-o', 'Vtb']
+       + srcs + [f'{out}/tb_{a.top}.cpp'])
+with open(f'{out}/verilator_build.log', 'w') as lg:
+    r = subprocess.run(cmd, stdout=lg, stderr=subprocess.STDOUT)
+tb_build = time.time() - t0
+assert r.returncode == 0, f'verilator build failed, see {out}/verilator_build.log'
+t0 = time.time()
+r = subprocess.run([f'{out}/obj_dir/Vtb'], cwd=out, capture_output=True, text=True)
+print(r.stdout, r.stderr)
+assert r.returncode == 0, 'simulation failed'
+tim = json.load(open(f'{out}/rtl_timing.json'))
+
+
+def load(fn):
+    rows = [list(map(int, l.split())) for l in open(fn) if l.strip()]
+    return np.array(rows, dtype=np.float64) if rows else np.zeros((0, NOUT))
+
+
+res = dict(top=a.top, n=N, input_ports=in_mode, n_in_ports=len(din), n_out=NOUT, result_t=f'ap_fixed<{rW},{rI}>',
+           cfg_bytes=len(cfg), build_s=round(tb_build), sim_s=round(time.time() - t0), timing=tim)
+for k in ('seq', 'stream'):
+    res[k] = cosim_check.check_values(load(f'{out}/rtl_{k}.txt'), Yf, F, n_expected=N, raw=True, label=f'verilator {k}')
+res['exact'] = f"{min(res['seq']['n_exact_events'], res['stream']['n_exact_events'])}/{N}"
+res['ok'] = bool(res['seq']['ok'] and res['stream']['ok'] and tim['partial_valid_cycles'] == 0)
+json.dump(res, open(f'{out}/verilator_check.json', 'w'), indent=1, default=str)
+print(json.dumps(res, indent=1, default=str))
+sys.exit(0 if res['ok'] else 1)

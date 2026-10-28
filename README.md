@@ -1,4 +1,6 @@
 # [Optimization Procedure] Neural Network Input Compression to 2-bit
+> **ASIC synthesis (symbolic MoE, Paper MLP and QConv2D):** [Start here](scripts/synth/README.md).
+
 ## Table of Contents ##
 * [Dataset](#dataset)
 * [Dataset Preprocessing](#dataset-preprocessing)

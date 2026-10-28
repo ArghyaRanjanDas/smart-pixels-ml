@@ -1,0 +1,23 @@
+# ORFS design config template, filled in by route_design.sh.
+# @TOP@ @VERILOG@ @SDC@ @UTIL@ @DENSITY@ @CLOCK_PS@ are substituted.
+export DESIGN_NAME     = @TOP@
+export DESIGN_NICKNAME = @TOP@
+export PLATFORM        = nangate45
+
+export VERILOG_FILES = @VERILOG@
+export SDC_FILE      = @SDC@
+
+# The 25 ns clock is very lax for Nangate45, so map for area.
+export ABC_AREA            = 1
+export ABC_CLOCK_PERIOD_IN_PS = @CLOCK_PS@
+
+# Square-ish core sized from the synthesized cell area.
+export CORE_UTILIZATION       = @UTIL@
+export CORE_ASPECT_RATIO      = 1
+export CORE_MARGIN            = 2
+export PLACE_DENSITY          = @DENSITY@
+export TNS_END_PERCENT        = 100
+
+# yosys 0.38 extract_fa produces functionally WRONG netlists on these designs
+# (gate-level != RTL on 200/200, found 2026-10-20). Disable the adder map.
+export ADDER_MAP_FILE =

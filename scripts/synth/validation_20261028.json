@@ -1,0 +1,186 @@
+{
+  "date_utc": "2026-10-28",
+  "scope": "Port validation: real-checkpoint full-cache C++ checks; no new HLS/RTL/physical synthesis in this port",
+  "runs": [
+    {
+      "model": "QMlp_Max",
+      "implementation": "const",
+      "checkpoint_sha256": "2f49b078f135852c7a80ed113fe70c7129a4c16c9fb63291643f7ba28ecdbf3a",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "53faa32ece67e0e6aa70a7c18a0bdf9ff521a06ae36d01b714e5576eb586525b",
+        "scope": "all supplied cache events compiled hls4ml C++; not RTL",
+        "model": "QMlp_Max"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    },
+    {
+      "model": "QMlp_Max",
+      "implementation": "prog",
+      "checkpoint_sha256": "2f49b078f135852c7a80ed113fe70c7129a4c16c9fb63291643f7ba28ecdbf3a",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "53faa32ece67e0e6aa70a7c18a0bdf9ff521a06ae36d01b714e5576eb586525b",
+        "scope": "all supplied cache events compiled hls4ml C++; not RTL",
+        "model": "QMlp_Max"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    },
+    {
+      "model": "QConv2D_Max",
+      "implementation": "const",
+      "checkpoint_sha256": "47a1edba5c8e74b567111c0d6f15f488f420ef0174faecb4db5290dfc09b7328",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "c98e76e540cc343b8667683b34c65a4f4445aeedf12f73826fc39711e91267bb",
+        "scope": "all supplied cache events compiled hls4ml C++; not RTL",
+        "model": "QConv2D_Max"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    },
+    {
+      "model": "QConv2D_Max",
+      "implementation": "prog",
+      "checkpoint_sha256": "47a1edba5c8e74b567111c0d6f15f488f420ef0174faecb4db5290dfc09b7328",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "c98e76e540cc343b8667683b34c65a4f4445aeedf12f73826fc39711e91267bb",
+        "scope": "all supplied cache events compiled hls4ml C++; not RTL",
+        "model": "QConv2D_Max"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    },
+    {
+      "model": "SymMoE_digi16nf",
+      "implementation": "const",
+      "checkpoint_sha256": "736e025a95497e746ef63a16954620bda0049cb28d2d2a96c8f5ec2c75d37f34",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "c3810f48b1242f88eec7f418307e9b2541b67eaac4ba8c1c74cb2f58e9648bb1",
+        "integer_reference_sha256": "019f5de8371e498553dabdf6619a49cb25ea48409f524f150d0a7a7155ef2125",
+        "kernel_sha256": "3127f738b595e954f8bb18d07b89dc353c10a9f2e676911b965da4edbb46e4bb"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    },
+    {
+      "model": "SymMoE_digi16nf",
+      "implementation": "prog",
+      "checkpoint_sha256": "736e025a95497e746ef63a16954620bda0049cb28d2d2a96c8f5ec2c75d37f34",
+      "compiled_cpp": {
+        "n": 37919,
+        "exact": 37919,
+        "max_err": 0.0,
+        "bundle_sha256": "c3810f48b1242f88eec7f418307e9b2541b67eaac4ba8c1c74cb2f58e9648bb1",
+        "integer_reference_sha256": "019f5de8371e498553dabdf6619a49cb25ea48409f524f150d0a7a7155ef2125",
+        "kernel_sha256": "3127f738b595e954f8bb18d07b89dc353c10a9f2e676911b965da4edbb46e4bb"
+      },
+      "c_testbench": {
+        "label": "csim",
+        "n_expected": 2000,
+        "n_results": 2000,
+        "n_compared": 2000,
+        "n_exact_events": 2000,
+        "n_bad_events": 0,
+        "n_bad_values": 0,
+        "max_abs_err_lsb": 0.0,
+        "frac_bits": 14,
+        "print_resid_lsb": 0.0,
+        "first_bad_events": [],
+        "ok": true
+      }
+    }
+  ],
+  "tested_source_sha256": {
+    "scripts/synth/hls4ml_models/convert.py": "ee5b45bbfdc41c8a8c7c92d1a73f8aa71139b609531e03081f7efb0462968484",
+    "scripts/synth/hls4ml_common/cosim_check.py": "7abc8688d80f4b2b55e950ed8143d4a7b42f4f0f5af82fd03afb4acdd756a1e7",
+    "scripts/synth/hls4ml_common/make_cfgwrap.py": "ffcad66c43c65c04b63de83de125c6957bb9500d765aee0bb7f84905bded7b7e",
+    "scripts/synth/hls4ml_common/hls4ml_fixes.py": "19f24120e3227300e1819682b9a320eb7241e1491d81952f2aebde28719b4e68",
+    "scripts/synth/hls4ml_common/verilator_check.py": "19373980d09c2176c75776fa6968ba73750fe48cf9a5fad1f428adf0b65af905",
+    "scripts/synth/hls4ml_common/patch_avgpool.py": "ed4a0b2b0dc0a5d801e3b9e717cc311bb88a63117008c2b98b70c9dfe250926d",
+    "scripts/synth/hls4ml_symmoe/nnet_symmoe_nf.h": "3127f738b595e954f8bb18d07b89dc353c10a9f2e676911b965da4edbb46e4bb",
+    "scripts/synth/hls4ml_symmoe/symmoe_nf_ref.py": "019f5de8371e498553dabdf6619a49cb25ea48409f524f150d0a7a7155ef2125",
+    "scripts/synth/hls4ml_symmoe/post_rtl_digi16nf.py": "c61c7b99dab5cc6e03f0e875553c373facdc67bd0bb7cb6b766347ea099b43b9",
+    "scripts/synth/hls4ml_symmoe/prep_digi16nf_val.py": "dfb313ff328ce62a4b78c677bbaad936b3fc44e7c86579777fa93efc9ea4d05a",
+    "scripts/synth/hls4ml_symmoe/symmoe_nf_hw.py": "4c6bc7f3562aec45977917fa0d3e28bff3df779e3702c60f84ccd08313e52d45",
+    "scripts/synth/hls4ml_symmoe/export_digi16nf.py": "c0843f877824ca7975ee6627631a51f43c542ed3a72afc81330113697d135ecd",
+    "scripts/synth/hls4ml_symmoe/symmoe_nf_hls4ml.py": "e6ce5186b57e79f456237d6258006d2adb87792753cc3933b255be0d1fe0adcb",
+    "scripts/synth/hls4ml_symmoe/convert_digi16nf.py": "d6b6e07ecff6eeb125afebc7e44c05863de52d8406ee7e173c2cf5e32f05a496",
+    "scripts/synth/hls4ml_symmoe/test_kernel_gxx.py": "a071fe053d1833287609a648e1447c4636d83bc9504f265c489e9d727e29f30b"
+  },
+  "raw_proof_archive_sha256": "0a6d1e97c975fc8b847ee82a3664c99a673857884b5e25aa93be5c9e8cc29085"
+}
